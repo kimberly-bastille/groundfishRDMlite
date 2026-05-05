@@ -7,7 +7,11 @@ library(shinyjs)
 #### Start UI ####
 ui <- fluidPage(
   useShinyjs(),
-  titlePanel("Western Gulf of Maine Cod and Haddock Recreational Fisheries Decision Support Tool"),
+  titlePanel(
+             div(
+               h1("Western Gulf of Maine Cod and Haddock Recreational Fisheries Decision Support Tool"),
+               h4("For display only - does NOT run model", style = "color: grey;")
+             )),
   #### Regulation Selection ####
   tabsetPanel(
     tabPanel("Cod and Haddock Model Summary",
