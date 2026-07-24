@@ -931,9 +931,8 @@ server <- function(input, output, session){
   # })
   
   # observeEvent(input$runmeplease, {
-  #   output$message <- renderText("Regulations saved - your model run has been queued. Results will appear in the output folder once processing completes. Be sure to change the run name before submitting another job.")
+  #   output$message <- renderText(paste0("Policy ", input$Run_Name," saved - your model run has been queued. Results will appear when the processing completes. Be sure to change the policy name before submitting again."))
   # })
-  # 
   
   ###Output Tables
   output$regtableout <- renderTable({
