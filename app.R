@@ -111,6 +111,8 @@ ui <- fluidPage(
           div(class = "app-title", "Western Gulf of Maine Cod and Haddock Recreational Fisheries Decision Support Tool")
       )
   ),
+  
+  p("For display only - does NOT run model", style = "color: red; font-size: 20px"),
   # Two tabs: a read-only summary of completed runs, then the form used to
   # compose and submit a new run.
   tabsetPanel(
@@ -134,7 +136,7 @@ ui <- fluidPage(
                label = "Supplemental Figures",
                choiceNames = list(
                  tagList(
-                   "CV",
+                   "Economic effects on anglers (CV)",
                    tags$a(
                      icon("circle-info"),
                      href = "https://github.com/kimberly-bastille/groundfishRDM/blob/main/docs/USER_GUIDE_GROUNDFISH.md#Understanding-Compensating-Variation",
@@ -305,6 +307,26 @@ server <- function(input, output, session){
   # There is no incremental refresh: "Update" reloads the whole browser page,
   # which re-evaluates outputs() and so picks up any result files the worker
   # has written since the session started.
+  
+  # observeEvent(input$runmeplease, {
+  #   output$displaymessage <- renderText(paste0("Policy ", input$Run_Name, " saved - your model run has been queued. ..."))
+  # })
+  
+  observeEvent(input$runmeplease, {
+    policy_name <- input$Run_Name   # captured once, at click time
+    output$displaymessage <- renderText(
+      paste0("Policy ", policy_name, " saved - your model run has been queued. ",
+             "Be sure to change the policy name before submitting again.")
+    )
+  })
+  
+  library(magrittr)
+  library(ggplot2)
+  #library(webshot)
+  
+  # There is no incremental refresh: "Update" reloads the whole browser page,
+  # which re-evaluates outputs() and so picks up any result files the worker
+  # has written since the session started.
   observeEvent(input$updatedat,{
     print("updating")
     shinyjs::js$refresh_page();
@@ -313,8 +335,12 @@ server <- function(input, output, session){
   #' @title Read all completed model results
   #' @description Stacks every CSV in output/ into one long-format table. Each
   #'   file is one model run; the run identifier travels in the files' own
-  #'   "model" column, so no filename parsing is needed.
-  #' @return A data.table with columns model, species, mode, draw, metric, value.
+  #'   "policy_name" column, so no filename parsing is needed. There is no
+  #'   species column: species is part of the metric name (e.g.
+  #'   "tot_keep_cod_weight_lb_new"), and results are split by season
+  #'   (summer/winter) and mode (fh/pr/"all modes").
+  #' @return A data.table with columns season, mode, metric, value, iteration,
+  #'   policy_name.
   outputs <- reactive({
     fnames <- list.files(path=here::here("output/"),pattern = "*.csv",full.names = T)
     
@@ -392,14 +418,16 @@ server <- function(input, output, session){
     # column is later labelled "%", which is only literally true when the model
     # is run with 100 draws.
     catch_agg<- outputs() %>%
-      dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
+      dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                  "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
                     mode == "all modes") %>%
-      dplyr::group_by(model, species,draw) %>%
+      dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+      dplyr::group_by(policy_name, species, iteration) %>%
       dplyr::summarise(Value = sum(as.numeric(value))) %>%
       dplyr::mutate(Value = Value * lb_to_mt()) %>%
       dplyr::mutate(under_acl = dplyr::case_when(species == "cod" & Value <= cod_acl() ~ 1, TRUE ~ 0),
                     under_acl = dplyr::case_when(species == "hadd" & Value <= had_acl() ~ 1, TRUE ~ under_acl)) %>%
-      dplyr::group_by(model, species) %>%
+      dplyr::group_by(policy_name, species) %>%
       dplyr::summarise(under_acl = sum(under_acl),
                        Value = round(median(Value),0)) %>%
       tidyr::pivot_wider(names_from = species, values_from = c(Value, under_acl))
@@ -447,7 +475,7 @@ server <- function(input, output, session){
     final_table <- seasons %>%
       dplyr::left_join(bags, by = c("model", "mode")) %>%
       dplyr::left_join(minsizes, by = c("model", "mode")) %>%
-      dplyr::left_join(catch_agg, by = c("model")) %>%
+      dplyr::left_join(catch_agg, by = c("model" = "policy_name")) %>%
       dplyr::select(model, mode, codseason, codbag, codlen, hadseason, hadbag, hadlen, Value_cod, Value_hadd, under_acl_cod, under_acl_hadd) %>%
       dplyr::rename(Mode = mode,
                     `Run Identifier` = model,
@@ -468,15 +496,17 @@ server <- function(input, output, session){
   output$totCatch <- plotly::renderPlotly({
     
     catch_agg<- outputs() %>%
-      dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                    mode == "all modes")%>%
-      dplyr::group_by(model, species,draw) %>%
+      dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                  "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                    mode == "all modes") %>%
+      dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+      dplyr::group_by(policy_name, species, iteration) %>%
       dplyr::summarise(Value = sum(as.numeric(value))) %>%
       dplyr::mutate(Value = Value * lb_to_mt()) %>%
       dplyr::mutate(under_acl = dplyr::case_when(species == "cod" & Value <= cod_acl() ~ 1, TRUE ~ 0),
                     under_acl = dplyr::case_when(species == "hadd" & Value <= had_acl() ~ 1, TRUE ~ under_acl)) %>%
-      dplyr::group_by(model, species) %>%
-      dplyr::summarise(under_acl = (100/length(unique(draw)))*sum(under_acl),
+      dplyr::group_by(policy_name, species) %>%
+      dplyr::summarise(under_acl = (100/length(unique(iteration)))*sum(under_acl),
                        Value = round(median(Value),0))  %>%
       tidyr::pivot_wider(names_from = species, values_from = c(Value, under_acl))
     
@@ -513,15 +543,15 @@ server <- function(input, output, session){
                                             "90-100%" = 1, "Less than 50%" = 1))+
       ggplot2::labs(colour="% of simulations under cod ACL",
                     size="% of simulations under haddock ACL")+
-      ggplot2::geom_text(ggplot2::aes(label = model), check_overlap = TRUE)+
+      ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
       ggplot2::geom_vline( xintercept =cod_acl(), linetype="dashed")+
       ggplot2::geom_hline( yintercept =had_acl(), color="grey45")+
       ggplot2::annotate(geom="text", x=cod_acl(), label="Cod ACL", y=1200) +
       ggplot2::annotate(geom="text", y=had_acl(), label="Had ACL", x=100) +
       ggplot2::guides(size = "none")+
-      ggplot2::ggtitle("Cod and Haddock Mortality")+
-      ggplot2::ylab("Median Recreational Haddock Mortality (mt)")+
-      ggplot2::xlab("Median Recreational Cod Mortality (mt)")
+      ggplot2::ggtitle("Cod and haddock mortality")+
+      ggplot2::ylab("Recreational maddock mortality (mt)")+
+      ggplot2::xlab("Recreational cod mortality (mt)")
     
     fig<- plotly::ggplotly(p) %>%
       plotly::style(textposition = "top center")
@@ -545,36 +575,44 @@ server <- function(input, output, session){
   # the year, i.e. how much better or worse off anglers are under this
   # policy. The figures use the level, CV.
   output$addCVCod <- renderUI({
-    
     if(any("CV" == input$fig)){
-      
-      plotly::renderPlotly({
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("cvCodPlot", height = "100%")
+      )
+    }
+  })
+
+  output$cvCodPlot <- plotly::renderPlotly({
+    req(any("CV" == input$fig))
         
         
         welfare <-  outputs() %>%
           dplyr::filter(metric == c("CV"),
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
+          dplyr::group_by(policy_name, iteration) %>%
           dplyr::summarise(value = sum(as.numeric(value))) %>%
-          tidyr::pivot_wider(names_from = model, values_from = value) %>%
-          tidyr::pivot_longer(-draw, names_to = "model", values_to = "value") %>%
-          dplyr::group_by(draw) %>%
-          dplyr::mutate(SQ_value = (value[model == "SQproposed"]),
+          tidyr::pivot_wider(names_from = policy_name, values_from = value) %>%
+          tidyr::pivot_longer(-iteration, names_to = "policy_name", values_to = "value") %>%
+          dplyr::group_by(iteration) %>%
+          dplyr::mutate(SQ_value = (value[policy_name == "SQ"]),
                         pct_diff = 100 * (value - SQ_value) / SQ_value) %>%
           dplyr::ungroup() %>%
           dplyr::mutate(CV = value)
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                        mode == "all modes")%>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                        mode == "all modes") %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(Value =round(median(Value),0)) %>%
           tidyr::pivot_wider(names_from = species, values_from = Value) %>%
           dplyr::left_join(welfare) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(`CV($M)` = median(CV)/1000000,
                            cod = median(cod),
                            hadd = median(hadd))
@@ -582,97 +620,122 @@ server <- function(input, output, session){
         p1<- catch %>% ggplot2::ggplot(ggplot2::aes(x = `CV($M)`, y = cod))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept =cod_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=max(`CV($M)`))) +
-          ggplot2::xlab("CV ($M)")+
-          ggplot2::ylab("Total Recreational Cod Mortality (mt)")+
-          ggplot2::labs(title = "<b>Cod Mortality (mt) compared to CV ($M)</b> - negative CV values indicate economic gains for anglers",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=catch$`CV($M)`[catch$policy_name == "SQ"])) +
+          ggplot2::xlab(NULL)+
+          ggplot2::ylab("Recreational cod mortality (mt)")+
+          ggplot2::labs(title = "<b>Cod mortality and economic effects on anglers</b><br>Negative compensating variation indicates overall economic gains to anglers relative to November 2025 through October 2026; <br>positive values indicate economic losses.",
                         subtitle = "testing")+
           ggplot2::theme(legend.position = "none")
         
         fig1<- plotly::ggplotly(p1) %>%
           plotly::style(textposition = "top center")
         
+        # --- decide which arrow to show ---
+        cv_vals    <- catch$`CV($M)`
+        n_neg      <- sum(cv_vals < 0, na.rm = TRUE)
+        n_pos      <- sum(cv_vals > 0, na.rm = TRUE)
+        show_gains <- n_neg >= n_pos   # ties go to "gains"
+        
+        if (show_gains) {
+          arrow_end  <- min(cv_vals, na.rm = TRUE)   # leftmost point
+          arrow_text <- "More favorable economic outcomes for anglers"
+          label_anchor <- "left"
+        } else {
+          arrow_end  <- max(cv_vals, na.rm = TRUE)   # rightmost point
+          arrow_text <- "Less favorable economic outcomes for anglers"
+          label_anchor <- "right"
+        }
+        
         fig1 <- fig1 %>%
           plotly::layout(
-            margin = list(b = 100),  # open up space below the axis for the arrow
+            # fixed pixel margins: room for the 3-line title (t) and the
+            # axis title + arrow + label below the plot (b)
+            margin = list(t = 100, b = 95),
+            title = list(font = list(size = 14)),
             annotations = list(
-              # arrowhead on the LEFT end, tail pointing right
+              # All three below-axis annotations sit at the bottom edge of the
+              # plot area (y = 0) and are pushed down a fixed number of pixels
+              # with yshift, so they stay the same distance from the axis at
+              # any plot size.
+
+              # x-axis title pinned to CV = 0
               list(
-                x = 0.05, y = -0.22,          # head position (paper coords)
-                ax = 0.45, ay = -0.22,        # tail position (paper coords)
-                xref = "paper", yref = "paper",
-                axref = "paper", ayref = "paper",
+                x = 0, y = 0,
+                xref = "x", yref = "paper",
+                xanchor = "center", yanchor = "top",
+                yshift = -25,
+                showarrow = FALSE,
+                text = "Compensating variation ($ millions)",
+                font = list(size = 14)
+              ),
+              # arrow starting at 0 and pointing toward the gains/losses side
+              list(
+                x = arrow_end, y = 0,         # head (data x)
+                ax = 0,        ay = 0,        # tail at CV = 0
+                xref = "x",  yref = "paper",
+                axref = "x", ayref = "paper",
+                yshift = -55,
                 showarrow = TRUE,
                 arrowhead = 2, arrowsize = 1, arrowwidth = 1.5,
                 text = ""
               ),
-              # arrowhead on the RIGHT end, tail pointing left
+              # label at the arrowhead end
               list(
-                x = 0.95, y = -0.22,
-                ax = 0.55, ay = -0.22,
-                xref = "paper", yref = "paper",
-                axref = "paper", ayref = "paper",
-                showarrow = TRUE,
-                arrowhead = 2, arrowsize = 1, arrowwidth = 1.5,
-                text = ""
-              ),
-              # "Better" label, left side
-              list(
-                x = 0.05, y = -0.30,
-                xref = "paper", yref = "paper",
+                x = arrow_end, y = 0,
+                xref = "x", yref = "paper",
+                xanchor = label_anchor, yanchor = "top",
+                yshift = -62,
                 showarrow = FALSE,
-                text = "Better policy for anglers",
-                font = list(size = 12)
-              ),
-              # "Worse" label, right side
-              list(
-                x = 0.95, y = -0.30,
-                xref = "paper", yref = "paper",
-                showarrow = FALSE,
-                text = "Worse",
+                text = arrow_text,
                 font = list(size = 12)
               )
             )
           )
         
         fig1
-      })
-      
-    }
   })
   
   
   output$addCVHad <- renderUI({
-    
     if(any("CV" == input$fig)){
-      
-      plotly::renderPlotly({
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("cvHadPlot", height = "100%")
+      )
+    }
+  })
+
+  output$cvHadPlot <- plotly::renderPlotly({
+    req(any("CV" == input$fig))
+        
         
         welfare <-  outputs() %>%
           dplyr::filter(metric == c("CV"),
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
+          dplyr::group_by(policy_name, iteration) %>%
           dplyr::summarise(value = sum(as.numeric(value))) %>%
-          tidyr::pivot_wider(names_from = model, values_from = value) %>%
-          tidyr::pivot_longer(-draw, names_to = "model", values_to = "value") %>%
-          dplyr::group_by(draw) %>%
-          dplyr::mutate(SQ_value = (value[model == "SQproposed"]),
+          tidyr::pivot_wider(names_from = policy_name, values_from = value) %>%
+          tidyr::pivot_longer(-iteration, names_to = "policy_name", values_to = "value") %>%
+          dplyr::group_by(iteration) %>%
+          dplyr::mutate(SQ_value = (value[policy_name == "SQ"]),
                         pct_diff = 100 * (value - SQ_value) / SQ_value) %>%
           dplyr::ungroup() %>%
           dplyr::mutate(CV = value)
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                        mode == "all modes")%>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                        mode == "all modes") %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(Value =round(median(Value),0)) %>%
           tidyr::pivot_wider(names_from = species, values_from = Value) %>%
           dplyr::left_join(welfare) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(`CV($M)` = median(CV)/1000000,
                            cod = median(cod),
                            hadd = median(hadd))
@@ -680,92 +743,116 @@ server <- function(input, output, session){
         p2<- catch %>% ggplot2::ggplot(ggplot2::aes(x = `CV($M)`, y = hadd))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept =had_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=max(`CV($M)`))) +
-          ggplot2::xlab("CV ($M)")+
-          ggplot2::ylab("Total Recreational Cod Mortality (mt)")+
-          ggplot2::labs(title = "<b>Haddock Mortality (mt) compared to CV ($M)</b> - negative CV values indicate economic gains for anglers",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=catch$`CV($M)`[catch$policy_name == "SQ"])) +
+          ggplot2::xlab(NULL)+
+          ggplot2::ylab("Recreational haddock mortality (mt)")+
+          ggplot2::labs(title = "<b>Haddock mortality and economic effects on anglers</b><br>Negative compensating variation indicates overall economic gains to anglers relative to November 2025 through October 2026; <br>positive values indicate economic losses.",
                         subtitle = "testing")+
           ggplot2::theme(legend.position = "none")
         
         fig2<- plotly::ggplotly(p2) %>%
           plotly::style(textposition = "top center")
         
+        # --- decide which arrow to show ---
+        cv_vals    <- catch$`CV($M)`
+        n_neg      <- sum(cv_vals < 0, na.rm = TRUE)
+        n_pos      <- sum(cv_vals > 0, na.rm = TRUE)
+        show_gains <- n_neg >= n_pos   # ties go to "gains"
+        
+        if (show_gains) {
+          arrow_end  <- min(cv_vals, na.rm = TRUE)   # leftmost point
+          arrow_text <- "More favorable economic outcomes for anglers"
+          label_anchor <- "left"
+        } else {
+          arrow_end  <- max(cv_vals, na.rm = TRUE)   # rightmost point
+          arrow_text <- "Less favorable economic outcomes for anglers"
+          label_anchor <- "right"
+        }
+        
         fig2 <- fig2 %>%
           plotly::layout(
-            margin = list(b = 100),  # open up space below the axis for the arrow
+            # fixed pixel margins: room for the 3-line title (t) and the
+            # axis title + arrow + label below the plot (b)
+            margin = list(t = 100, b = 95),
+            title = list(font = list(size = 14)),
             annotations = list(
-              # arrowhead on the LEFT end, tail pointing right
+              # All three below-axis annotations sit at the bottom edge of the
+              # plot area (y = 0) and are pushed down a fixed number of pixels
+              # with yshift, so they stay the same distance from the axis at
+              # any plot size.
+
+              # x-axis title pinned to CV = 0
               list(
-                x = 0.05, y = -0.22,          # head position (paper coords)
-                ax = 0.45, ay = -0.22,        # tail position (paper coords)
-                xref = "paper", yref = "paper",
-                axref = "paper", ayref = "paper",
+                x = 0, y = 0,
+                xref = "x", yref = "paper",
+                xanchor = "center", yanchor = "top",
+                yshift = -25,
+                showarrow = FALSE,
+                text = "Compensating variation ($ millions)",
+                font = list(size = 14)
+              ),
+              # arrow starting at 0 and pointing toward the gains/losses side
+              list(
+                x = arrow_end, y = 0,         # head (data x)
+                ax = 0,        ay = 0,        # tail at CV = 0
+                xref = "x",  yref = "paper",
+                axref = "x", ayref = "paper",
+                yshift = -55,
                 showarrow = TRUE,
                 arrowhead = 2, arrowsize = 1, arrowwidth = 1.5,
                 text = ""
               ),
-              # arrowhead on the RIGHT end, tail pointing left
+              # label at the arrowhead end
               list(
-                x = 0.95, y = -0.22,
-                ax = 0.55, ay = -0.22,
-                xref = "paper", yref = "paper",
-                axref = "paper", ayref = "paper",
-                showarrow = TRUE,
-                arrowhead = 2, arrowsize = 1, arrowwidth = 1.5,
-                text = ""
-              ),
-              # "Better" label, left side
-              list(
-                x = 0.05, y = -0.30,
-                xref = "paper", yref = "paper",
+                x = arrow_end, y = 0,
+                xref = "x", yref = "paper",
+                xanchor = label_anchor, yanchor = "top",
+                yshift = -62,
                 showarrow = FALSE,
-                text = "Better policy for anglers",
-                font = list(size = 12)
-              ),
-              # "Worse" label, right side
-              list(
-                x = 0.95, y = -0.30,
-                xref = "paper", yref = "paper",
-                showarrow = FALSE,
-                text = "Worse",
+                text = arrow_text,
                 font = list(size = 12)
               )
             )
           )
         
         fig2
-      })
-      
-    }
   })
   
+  
   output$addReleaseCod <- renderUI({
-    
     if(any("Discards" == input$fig)){
-      
-      plotly::renderPlotly({
-        
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("releaseCodPlot", height = "100%")
+      )
+    }
+  })
+
+  output$releaseCodPlot <- plotly::renderPlotly({
+    req(any("Discards" == input$fig))
         discmort <-  outputs() %>%
-          dplyr::filter(metric == c("discmort_weight"),
+          dplyr::filter(metric %in% c("tot_discmort_cod_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
-          dplyr::mutate(disc_mort = value * lb_to_mt())  %>%
-          dplyr::select(!c(metric,value))
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, iteration, species, mode) %>%
+          dplyr::summarise(disc_mort = sum(as.numeric(value)) * lb_to_mt(), .groups = "drop")
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                        mode == "all modes")%>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                        mode == "all modes") %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(tot_mort =round(median(Value),0)) %>%
           
           dplyr::left_join(discmort) %>%
-          dplyr::group_by(model, draw, mode) %>%
+          dplyr::group_by(policy_name, iteration, mode) %>%
           tidyr::pivot_wider(names_from = species, values_from = c(tot_mort, disc_mort)) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(`Cod Total Mortality` = median(tot_mort_cod),
                            `Haddock Total Mortality` = median(tot_mort_hadd),
                            `Cod Discard Mortality` = median(disc_mort_cod),
@@ -774,45 +861,52 @@ server <- function(input, output, session){
         p3<- catch %>% ggplot2::ggplot(ggplot2::aes(x = `Cod Discard Mortality`, y = `Cod Total Mortality`))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept =cod_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=max(`Cod Discard Mortality`))) +
-          ggplot2::xlab("Cod Discard Mortality (mt)")+
-          ggplot2::ylab("Total Recreational Cod Mortality (mt)")+
-          ggplot2::labs(title = "Total Cod Mortality (mt) compared to Discard Mortality(mt)",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=catch$`Cod Discard Mortality`[catch$policy_name == "SQ"])) +
+          ggplot2::xlab("Cod discard mortality (mt)")+
+          ggplot2::ylab("Recreational cod mortality (mt)")+
+          ggplot2::labs(title = "Cod mortality (mt) compared to discard mortality(mt)",
                         subtitle = "")+
           ggplot2::theme(legend.position = "none")
         
         fig3<- plotly::ggplotly(p3)%>%
           plotly::style(textposition = "top center")
         fig3
-      })
-    }
   })
   
   output$addReleaseHad <- renderUI({
     if(any("Discards" == input$fig)){
-      
-      plotly::renderPlotly({
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("releaseHadPlot", height = "100%")
+      )
+    }
+  })
+
+  output$releaseHadPlot <- plotly::renderPlotly({
+    req(any("Discards" == input$fig))
         discmort <-  outputs() %>%
-          dplyr::filter(metric == c("discmort_weight"),
+          dplyr::filter(metric %in% c("tot_discmort_cod_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
-          dplyr::mutate(disc_mort = value * lb_to_mt())  %>%
-          dplyr::select(!c(metric,value))
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, iteration, species, mode) %>%
+          dplyr::summarise(disc_mort = sum(as.numeric(value)) * lb_to_mt(), .groups = "drop")
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                        mode == "all modes")%>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                        mode == "all modes") %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(tot_mort =round(median(Value),0)) %>%
           
           dplyr::left_join(discmort) %>%
-          dplyr::group_by(model, draw, mode) %>%
+          dplyr::group_by(policy_name, iteration, mode) %>%
           tidyr::pivot_wider(names_from = species, values_from = c(tot_mort, disc_mort)) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(`Cod Total Mortality` = median(tot_mort_cod),
                            `Haddock Total Mortality` = median(tot_mort_hadd),
                            `Cod Discard Mortality` = median(disc_mort_cod),
@@ -821,45 +915,50 @@ server <- function(input, output, session){
         p4<- catch %>% ggplot2::ggplot(ggplot2::aes(x = `Haddock Discard Mortality`, y = `Haddock Total Mortality`))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept =had_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=max(`Haddock Discard Mortality`))) +
-          ggplot2::xlab("Haddock Discard Mortality (mt)")+
-          ggplot2::ylab("Total Recreational Haddock Mortality (mt)")+
-          ggplot2::labs(title = "Total Haddock Mortality (mt) compared to Discard Mortality (mt)",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=catch$`Cod Discard Mortality`[catch$policy_name == "SQ"])) +
+          ggplot2::xlab("Haddock discard mortality (mt)")+
+          ggplot2::ylab("Recreational haddock mortality (mt)")+
+          ggplot2::labs(title = "Haddock mortality (mt) compared to discard mortality (mt)",
                         subtitle = "testing")+
           ggplot2::theme(legend.position = "none")
         
         fig4<- plotly::ggplotly(p4)%>%
           plotly::style(textposition = "top center")
         fig4
-        
-      })
-    }
   })
   
   output$addTripsCod <- renderUI({
     if(any("Trips" == input$fig)){
-      
-      plotly::renderPlotly({
-        
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("tripsCodPlot", height = "100%")
+      )
+    }
+  })
+
+  output$tripsCodPlot <- plotly::renderPlotly({
+    req(any("Trips" == input$fig))
         trips <-  outputs() %>%
-          dplyr::filter(metric == c("predicted_trips"),
+          dplyr::filter(metric == "n_trips_alt",
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
+          dplyr::group_by(policy_name, iteration) %>%
           dplyr::summarise(value = sum(as.numeric(value))) %>%
           dplyr::ungroup()
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
-                        mode == "all modes")%>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
+                        mode == "all modes") %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(Value =round(median(Value),0)) %>%
           tidyr::pivot_wider(names_from = species, values_from = Value) %>%
           dplyr::left_join(trips) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(Trips = median(value),
                            cod = median(cod),
                            hadd = median(hadd))
@@ -867,45 +966,51 @@ server <- function(input, output, session){
         p5<- catch %>% ggplot2::ggplot(ggplot2::aes(x = Trips, y = `cod`))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept = cod_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=max(Trips)), angle=90) +
-          ggplot2::xlab("Number of Trips")+
-          ggplot2::ylab("Total Recreational Cod Mortality (mt)")+
-          ggplot2::labs(title = "Cod Mortality (mt) compared to Total Number of Trips",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=cod_acl(), label="Cod ACL", x=catch$`Trips`[catch$policy_name == "SQ"]), angle=90) +
+          ggplot2::xlab("Number of trips")+
+          ggplot2::ylab("Recreational cod mortality (mt)")+
+          ggplot2::labs(title = "Cod mortality (mt) compared to total number of trips",
                         subtitle = "testing")+
           ggplot2::theme(legend.position = "none")
         
         fig5<- plotly::ggplotly(p5)%>%
           plotly::style(textposition = "top center")
         fig5
-        
-      })
-    }
   })
   
   
   output$addTripsHad <- renderUI({
     if(any("Trips" == input$fig)){
-      
-      plotly::renderPlotly({
+      div(
+        style = "width: 100%; aspect-ratio: 16 / 9;",   # change the ratio here
+        plotly::plotlyOutput("tripsHadPlot", height = "100%")
+      )
+    }
+  })
+
+  output$tripsHadPlot <- plotly::renderPlotly({
+    req(any("Trips" == input$fig))
         trips <- outputs() %>%
-          dplyr::filter(metric == c("predicted_trips"),
+          dplyr::filter(metric == "n_trips_alt",
                         mode == "all modes") %>%
-          dplyr::group_by(model,  draw) %>%
+          dplyr::group_by(policy_name, iteration) %>%
           dplyr::summarise(value = sum(as.numeric(value))) %>%
           dplyr::ungroup()
         
         catch<- outputs() %>%
-          dplyr::filter(metric %in% c("keep_weight", "discmort_weight"),
+          dplyr::filter(metric %in% c("tot_keep_cod_weight_lb_new", "tot_discmort_cod_weight_lb_new",
+                                      "tot_keep_hadd_weight_lb_new", "tot_discmort_hadd_weight_lb_new"),
                         mode == "all modes") %>%
-          dplyr::group_by(model, species,draw) %>%
+          dplyr::mutate(species = stringr::str_extract(metric, "cod|hadd")) %>%
+          dplyr::group_by(policy_name, species, iteration) %>%
           dplyr::summarise(Value = sum(as.numeric(value))) %>%
           dplyr::mutate(Value = Value * lb_to_mt()) %>%
-          dplyr::group_by(model, draw, species) %>%
+          dplyr::group_by(policy_name, iteration, species) %>%
           dplyr::summarise(Value =round(median(Value),0)) %>%
           tidyr::pivot_wider(names_from = species, values_from = Value) %>%
           dplyr::left_join(trips) %>%
-          dplyr::group_by(model) %>%
+          dplyr::group_by(policy_name) %>%
           dplyr::summarise(Trips = median(value),
                            cod = median(cod),
                            hadd = median(hadd))
@@ -914,20 +1019,19 @@ server <- function(input, output, session){
         p6<- catch %>% ggplot2::ggplot(ggplot2::aes(x =Trips , y = hadd))+
           ggplot2::geom_point() +
           ggplot2::geom_hline( yintercept = had_acl())+
-          ggplot2::geom_text(ggplot2::aes(label=model), check_overlap = TRUE)+
-          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=max(Trips))) +
-          ggplot2::xlab("Number of Trips")+
-          ggplot2::ylab("Total Recreational Haddock Mortality (mt)")+
-          ggplot2::labs(title = "Haddock Mortality (mt) compared to Total Number of Trips",
+          ggplot2::geom_text(ggplot2::aes(label = policy_name), check_overlap = TRUE)+
+          ggplot2::geom_text(ggplot2::aes(y=had_acl(), label="Had ACL", x=catch$`Trips`[catch$policy_name == "SQ"])) +
+          ggplot2::xlab("Number of trips")+
+          ggplot2::ylab("Recreational haddock mortality (mt)")+
+          ggplot2::labs(title = "Haddock mortality (mt) compared to total number of trips",
                         subtitle = "testing")+
           ggplot2::theme(legend.position = "none")
         
         fig6<- plotly::ggplotly(p6)%>%
           plotly::style(textposition = "top center")
         fig6
-      })
-    }
   })
+  
   
   ################################################################################
   ################################################################################
